@@ -1,0 +1,946 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template to stand up a CodePipeline stack for HVGN backend"
+
+Parameters:
+  PipelineArtifactsBucket:
+    Description: Bucket name to store pipeline artifacts
+    Type: String
+  CodeCommitRepositoryName:
+    Description: Name of the CodeCommit repository housing the code (in master branch)
+    Type: String
+  ApiDomain:
+    Description: Domain name of backend API
+    Type: String
+  HostedZoneId:
+    Description: Route 53 Hosted Zone ID for domain
+    Type: String
+
+Resources:
+  HvgnBackendPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: hvgn-backend-pipeline
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactsBucket
+      RestartExecutionOnUpdate: false
+      RoleArn: !GetAtt 
+        - HvgnBackendPipelineServiceRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Namespace: SourceVariables
+              Configuration:
+                RepositoryName: !Ref CodeCommitRepositoryName
+                BranchName: master
+                PollForSourceChanges: false
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Namespace: BuildVariables
+              Configuration:
+                ProjectName: hvgn-backend
+                PrimarySource: SourceArtifact
+              RunOrder: 1
+        - Name: hvgn-backend-dev-deploy
+          Actions:
+            - Name: hvgn-backend-dev-deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: hvgn-backend-codebuild-deploy-dev
+                PrimarySource: BuildArtifact
+                EnvironmentVariables: '[{"name":"env","value":"dev","type":"PLAINTEXT"}]'
+              RunOrder: 1
+        - Name: prod-approval
+          Actions:
+            - Name: prod-approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: '1'
+                Provider: Manual
+              Configuration:
+                CustomData: "Please review the HVGN backend"
+              RunOrder: 1
+        - Name: hvgn-backend-prod-deploy
+          Actions:
+            - Name: hvgn-backend-prod-deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: hvgn-backend-codebuild-deploy-prod
+                PrimarySource: BuildArtifact
+                EnvironmentVariables: '[{"name":"env","value":"prod","type":"PLAINTEXT"}]'
+              RunOrder: 1
+
+  HvgnBackendBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: hvgn-backend
+      Description: "CodeBuild project for packaging serverless components"
+      Source:
+        GitCloneDepth: 1
+        Type: CODEPIPELINE
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+        S3Logs:
+          EncryptionDisabled: false
+          Status: DISABLED
+      QueuedTimeoutInMinutes: 480
+      TimeoutInMinutes: 60
+      ServiceRole: !GetAtt 
+        - HvgnBackendBuildServiceRole
+        - Arn
+
+  HvgnBackendBuildDeployDev:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: hvgn-backend-codebuild-deploy-dev
+      Description: "CodeBuild project for deploying serverless components to dev"
+      Source:
+        GitCloneDepth: 1
+        Type: CODEPIPELINE
+        BuildSpec: deploy/buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+        S3Logs:
+          EncryptionDisabled: false
+          Status: DISABLED
+      QueuedTimeoutInMinutes: 480
+      TimeoutInMinutes: 60
+      ServiceRole: !GetAtt 
+        - HvgnBackendBuildDeployDevServiceRole
+        - Arn
+
+  HvgnBackendBuildDeployProd:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: hvgn-backend-codebuild-deploy-prod
+      Description: "CodeBuild project for deploying serverless components to prod"
+      Source:
+        GitCloneDepth: 1
+        Type: CODEPIPELINE
+        BuildSpec: deploy/buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        Type: LINUX_CONTAINER
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+        S3Logs:
+          EncryptionDisabled: false
+          Status: DISABLED
+      QueuedTimeoutInMinutes: 480
+      TimeoutInMinutes: 60
+      ServiceRole: !GetAtt 
+        - HvgnBackendBuildDeployProdServiceRole
+        - Arn
+    
+  AmazonCloudWatchEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: CloudWatch Events Rule to trigger pipeline upon CodeCommit commit
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !Join 
+            - ''
+            - - 'arn:aws:codecommit:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref CodeCommitRepositoryName
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - master
+      Targets:
+        - Arn: !Join 
+            - ''
+            - - 'arn:aws:codepipeline:'
+              - !Ref 'AWS::Region'
+              - ':'
+              - !Ref 'AWS::AccountId'
+              - ':'
+              - !Ref HvgnBackendPipeline
+          RoleArn: !GetAtt 
+            - CodeCommitCloudWatchEventRole
+            - Arn
+          Id: codepipeline-HvgnBackendPipeline
+
+
+  HvgnBackendPipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hvgn-backend-codepipeline-service-role
+      Description: Service role for CodePipeline
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: hvgn-backend-code-pipeline-service-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codecommit:CancelUploadArchive'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codestar-connections:UseConnection'
+                  - 'codecommit:GetBranch'
+                  - 'codecommit:GetCommit'
+                  - 'codecommit:GetUploadArchiveStatus'
+                  - 'codecommit:UploadArchive'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'cloudwatch:*'
+                  - 's3:*'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchGetBuilds'
+                  - 'codebuild:StartBuild'
+                Resource: '*'
+
+  HvgnBackendBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hvgn-backend-build-service-role
+      Description: Service role for CodeBuild project to package
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole' 
+      Policies:
+        - PolicyName: hvgn-backend-build-service-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codebuild:BatchPutTestCases'
+                  - 'codebuild:CreateReport'
+                  - 'codebuild:CreateReportGroup'
+                  - 'codebuild:UpdateReport'
+                  - 'codecommit:GitPull'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:codebuild:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':report-group/hvgn-backend-*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:codecommit:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':hvgn-backend'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':log-group:/aws/codebuild/hvgn-backend*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':log-group:/aws/codebuild/'
+                      - !Ref "AWS::StackName"
+                      - ':*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref PipelineArtifactsBucket
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref PipelineArtifactsBucket
+                      - '/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:ssm:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':parameter/'
+                      - !Ref ApiDomain
+                      - '/dev/apikey'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:ssm:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':parameter/'
+                      - !Ref ApiDomain
+                      - '/prod/apikey'
+              - Effect: Allow
+                Action:
+                  - 'ssm:DescribeParameters'
+                Resource: '*'
+
+  HvgnBackendBuildDeployDevServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: hvgn-backend-build-deploy-dev-service-role
+      Description: Service role for CodeBuild to deploy to dev
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: hvgn-backend-build-deploy-dev-service-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'acm:ListCertificates'
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:CreateUploadBucket'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:Describe*'
+                  - 'cloudformation:Get*'
+                  - 'cloudformation:List*'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudfront:UpdateDistribution'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'events:DeleteEventBus'
+                  - 'events:DeletePartnerEventSource'
+                  - 'events:Put*'
+                  - 'events:RemovePermission'
+                  - 'lambda:CreateFunction'
+                  - 'lambda:Get*'
+                  - 'lambda:List*'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:FilterLogEvents'
+                  - 'route53:GetHostedZone'
+                  - 'route53:ListHostedZones'
+                  - 'route53:ListResourceRecordSets'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'apigateway:DELETE'
+                  - 'apigateway:GET'
+                  - 'apigateway:PATCH'
+                  - 'apigateway:POST'
+                  - 'apigateway:PUT'
+                  - 'events:DeleteRule'
+                  - 'events:RemoveTargets'
+                  - 'iam:PassRole'
+                  - 'lambda:AddPermission'
+                  - 'lambda:CreateAlias'
+                  - 'lambda:DeleteFunction'
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:PublishVersion'
+                  - 'lambda:RemovePermission'
+                  - 'lambda:Update*'
+                  - 'logs:CreateLogStream'
+                  - 'logs:DeleteLogGroup'
+                  - 'route53:ChangeResourceRecordSets'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'                  
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketAcl'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/apikeys*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/basepathmappings*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/restapis*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/usageplans*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                      - '/basepathmappings'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                      - '/basepathmappings/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:events:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':rule/'
+                      - !Ref "AWS::StackName"
+                      - '-dev-'
+                      - !Ref "AWS::Region"
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:lambda:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':function:hvgn-backend-dev-*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:route53:::hostedzone/'
+                      - !Ref HostedZoneId
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::codepipeline-'
+                      - !Ref "AWS::Region"
+                      - '-*'
+              - Effect: Allow
+                Action:
+                  - 'events:DescribeRule'
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:PutRolePolicy'
+                  - 'logs:PutLogEvents'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:events:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':rule/'
+                      - !Ref "AWS::StackName"
+                      - '-dev-*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - 'hvgn-backend-dev-serverlessdeploymentbucket-*'
+              - Effect: Allow
+                Action:
+                  - 'iam:CreateServiceLinkedRole'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:DeleteObject'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - 'arn:aws:iam:::role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref PipelineArtifactsBucket
+                      - '/*'
+              - Effect: Allow
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:PutRolePolicy'
+                  - 's3:CreateBucket'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/GetFamilyByIdExecutionRole-dev' 
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/GetIndividualByIdExecutionRole-dev'  
+                  - 'arn:aws:s3:::*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:DescribeParameters'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:ssm:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':parameter/'
+                      - !Ref ApiDomain
+                      - '/dev/apikey'
+
+  HvgnBackendBuildDeployProdServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: test-hvgn-backend-build-deploy-prod-service-role
+      Description: Service role for CodeBuild to deploy to prod
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: test-hvgn-backend-build-deploy-prod-service-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'acm:ListCertificates'
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:CreateUploadBucket'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:Describe*'
+                  - 'cloudformation:Get*'
+                  - 'cloudformation:List*'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudfront:UpdateDistribution'
+                  - 'cloudwatch:GetMetricStatistics'
+                  - 'events:DeleteEventBus'
+                  - 'events:DeletePartnerEventSource'
+                  - 'events:Put*'
+                  - 'events:RemovePermission'
+                  - 'lambda:CreateFunction'
+                  - 'lambda:Get*'
+                  - 'lambda:List*'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:FilterLogEvents'
+                  - 'route53:GetHostedZone'
+                  - 'route53:ListHostedZones'
+                  - 'route53:ListResourceRecordSets'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'apigateway:DELETE'
+                  - 'apigateway:GET'
+                  - 'apigateway:PATCH'
+                  - 'apigateway:POST'
+                  - 'apigateway:PUT'
+                  - 'events:DeleteRule'
+                  - 'events:RemoveTargets'
+                  - 'iam:PassRole'
+                  - 'lambda:AddPermission'
+                  - 'lambda:CreateAlias'
+                  - 'lambda:DeleteFunction'
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:PublishVersion'
+                  - 'lambda:RemovePermission'
+                  - 'lambda:Update*'
+                  - 'logs:CreateLogStream'
+                  - 'logs:DeleteLogGroup'
+                  - 'route53:ChangeResourceRecordSets'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketAcl'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/apikeys*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/basepathmappings*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                      - '/basepathmappings'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/domainnames/'
+                      - !Ref ApiDomain
+                      - '/basepathmappings/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/restapis*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:apigateway:'
+                      - !Ref "AWS::Region"
+                      - '::/usageplans*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:events:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':rule/'
+                      - !Ref "AWS::StackName"
+                      - '-prod-'
+                      - !Ref "AWS::Region"
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:lambda:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':function:hvgn-backend-prod-*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:route53:::hostedzone/'
+                      - !Ref HostedZoneId
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::codepipeline-'
+                      - !Ref "AWS::Region"
+                      - '-*'
+              - Effect: Allow
+                Action:
+                  - 'events:DescribeRule'
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:PutRolePolicy'
+                  - 'logs:PutLogEvents'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:events:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':rule/'
+                      - !Ref "AWS::StackName"
+                      - '-prod-*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':*'
+                  - 'arn:aws:s3:::hvgn-backend-prod-serverlessdeploymentbucket-*'
+              - Effect: Allow
+                Action:
+                  - 'iam:CreateServiceLinkedRole'
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:DeleteObject'
+                  - 's3:GetBucketAcl'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetEncryptionConfiguration'
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                  - 's3:PutAccelerateConfiguration'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - 'arn:aws:iam:::role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref PipelineArtifactsBucket
+                      - '/*'            
+              - Effect: Allow
+                Action:
+                  - 'iam:CreateRole'
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:PutRolePolicy'
+                  - 's3:CreateBucket'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/GetFamilyByIdExecutionRole-prod' 
+                  - !Join
+                    - ''
+                    - - 'arn:aws:iam::'
+                      - !Ref "AWS::AccountId"
+                      - ':role/GetIndividualByIdExecutionRole-prod' 
+                  - 'arn:aws:s3:::*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:DescribeParameters'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:ssm:'
+                      - !Ref "AWS::Region"
+                      - ':'
+                      - !Ref "AWS::AccountId"
+                      - ':parameter/'
+                      - !Ref ApiDomain
+                      - '/prod/apikey'
+
+  CodeCommitCloudWatchEventRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Description: Role for CloudWatch Event
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'codepipeline:StartPipelineExecution'
+                Resource: !Join 
+                  - ''
+                  - - 'arn:aws:codepipeline:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':'
+                    - !Ref HvgnBackendPipeline
