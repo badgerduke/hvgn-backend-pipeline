@@ -396,10 +396,13 @@ Resources:
               - Effect: Allow
                 Action:
                   - 'acm:ListCertificates'
+                  - 'cloudformation:CreateChangeSet'
                   - 'cloudformation:CreateStack'
                   - 'cloudformation:CreateUploadBucket'
+                  - 'cloudformation:DeleteChangeSet'
                   - 'cloudformation:DeleteStack'
                   - 'cloudformation:Describe*'
+                  - 'cloudformation:ExecuteChangeSet'
                   - 'cloudformation:Get*'
                   - 'cloudformation:List*'
                   - 'cloudformation:UpdateStack'
@@ -647,7 +650,7 @@ Resources:
   HvgnBackendBuildDeployProdServiceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: test-hvgn-backend-build-deploy-prod-service-role
+      RoleName: hvgn-backend-build-deploy-prod-service-role
       Description: Service role for CodeBuild to deploy to prod
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -659,17 +662,20 @@ Resources:
             Action:
               - 'sts:AssumeRole'
       Policies:
-        - PolicyName: test-hvgn-backend-build-deploy-prod-service-policy
+        - PolicyName: hvgn-backend-build-deploy-prod-service-policy
           PolicyDocument:
             Version: 2012-10-17
             Statement:
               - Effect: Allow
                 Action:
                   - 'acm:ListCertificates'
+                  - 'cloudformation:CreateChangeSet'
                   - 'cloudformation:CreateStack'
                   - 'cloudformation:CreateUploadBucket'
+                  - 'cloudformation:DeleteChangeSet'
                   - 'cloudformation:DeleteStack'
                   - 'cloudformation:Describe*'
+                  - 'cloudformation:ExecuteChangeSet'
                   - 'cloudformation:Get*'
                   - 'cloudformation:List*'
                   - 'cloudformation:UpdateStack'
