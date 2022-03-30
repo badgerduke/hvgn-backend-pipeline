@@ -395,6 +395,33 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:cloudwatch:'
+                      - !Ref "AWS::Region"
+                      - '::alarm:hvgn-apigateway-dev-4xx-alarm'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:cloudwatch:'
+                      - !Ref "AWS::Region"
+                      - '::alarm:hvgn-apigateway-dev-5xx-alarm'
+              - Effect: Allow
+                Action:
+                  - 'sns:DeleteTopic'
+                  - 'sns:GetTopicAttributes'
+                  - 'sns:Subscribe'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:sns:'
+                      - !Ref "AWS::Region"
+                      - '::hvgn-apigateway-dev-topic'
+              - Effect: Allow
+                Action:
                   - 'acm:ListCertificates'
                   - 'cloudformation:CreateChangeSet'
                   - 'cloudformation:CreateStack'
@@ -423,6 +450,7 @@ Resources:
                   - 'route53:GetHostedZone'
                   - 'route53:ListHostedZones'
                   - 'route53:ListResourceRecordSets'
+                  - 'sns:CreateTopic'
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -668,6 +696,33 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:cloudwatch:'
+                      - !Ref "AWS::Region"
+                      - '::alarm:hvgn-apigateway-prod-4xx-alarm'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:cloudwatch:'
+                      - !Ref "AWS::Region"
+                      - '::alarm:hvgn-apigateway-prod-5xx-alarm'
+              - Effect: Allow
+                Action:
+                  - 'sns:DeleteTopic'
+                  - 'sns:GetTopicAttributes'
+                  - 'sns:Subscribe'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:sns:'
+                      - !Ref "AWS::Region"
+                      - '::hvgn-apigateway-prod-topic'
+              - Effect: Allow
+                Action:
                   - 'acm:ListCertificates'
                   - 'cloudformation:CreateChangeSet'
                   - 'cloudformation:CreateStack'
@@ -696,6 +751,7 @@ Resources:
                   - 'route53:GetHostedZone'
                   - 'route53:ListHostedZones'
                   - 'route53:ListResourceRecordSets'
+                  - 'sns:CreateTopic'
                 Resource: '*'
               - Effect: Allow
                 Action:
